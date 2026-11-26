@@ -46,14 +46,21 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: 初始化 Android SDK
-        uses: android-actions/setup-android@v3
-
+      # ubuntu-latest 已预装 Android SDK 并接受许可。不要再用
+      # android-actions/setup-android@v3：它内部会执行已下架的 `sdkmanager tools`，
+      # 在当前的 SDK 仓库上必然以 exit code 1 失败。
       - name: 安装 Android SDK 组件
         shell: bash
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager --install \
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort | head -n 1)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "找不到 sdkmanager，请确认 runner 预装了 Android SDK"
+            exit 1
+          fi
+          echo "sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --install \
             "platforms;android-36" \
             "build-tools;36.0.0" \
             "ndk;29.0.13113456"
