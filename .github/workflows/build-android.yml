@@ -1,0 +1,122 @@
+name: 构建 Android APK
+
+# 说明：本工作流只负责编译并上传 APK，不改动仓库原有的 release.yml（发版公告）。
+# 触发方式：
+#   1) 手动触发：Actions 页面 -> Build Android APK -> Run workflow
+#   2) 打 tag 触发：git tag v* && git push origin v*
+
+on:
+  workflow_dispatch:
+    inputs:
+      flutter_version:
+        description: 'Flutter 版本（需 Dart >= 3.13.1，最低稳定版 3.47.1；默认取 3.47.9）'
+        required: false
+        default: '3.47.9'
+        type: string
+      attach_to_release:
+        description: '是否在同名 Release 上附加 APK（仅当前 ref 是 tag 时有效）'
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+# pubspec.lock 要求 dart >= 3.13.1；Flutter 3.44.x 自带 Dart 3.12，不满足。
+# 满足该约束的最低稳定版是 3.47.1（Dart 3.13.1），这里默认取同系列最新补丁 3.47.9。
+env:
+  FLUTTER_VERSION: ${{ inputs.flutter_version || '3.47.9' }}
+
+jobs:
+  build-android:
+    name: 构建 Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 配置 Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 初始化 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 Android SDK 组件
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;29.0.13113456"
+
+      # 项目默认把 Gradle 发行版指向腾讯云镜像，CI 在境外网络下可能很慢；
+      # 换成 Gradle 官方源，仓库源码本身不作修改。
+      - name: 切换 Gradle 分发源为官方地址
+        shell: bash
+        run: |
+          sed -i 's|mirrors.cloud.tencent.com/gradle|services.gradle.org/distributions|' \
+            android/gradle/wrapper/gradle-wrapper.properties
+          grep distributionUrl android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: 配置 Flutter ${{ env.FLUTTER_VERSION }}
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: 检查构建环境
+        run: flutter doctor -v
+
+      - name: 拉取 Dart 依赖
+        run: flutter pub get
+
+      - name: 构建通用 APK
+        run: flutter build apk --release
+
+      - name: 构建分架构 APK
+        run: flutter build apk --release --split-per-abi
+
+      - name: 按版本号重命名 APK
+        shell: bash
+        run: |
+          VER=$(tr -d '[:space:]' < VERSION)
+          cd build/app/outputs/flutter-apk
+          for f in *.apk; do
+            case "$f" in
+              app-release.apk)
+                mv "$f" "PolyFlixPlayer-v${VER}-universal.apk"
+                ;;
+              app-*-release.apk)
+                ABI=${f#app-}
+                ABI=${ABI%-release.apk}
+                mv "$f" "PolyFlixPlayer-v${VER}-${ABI}.apk"
+                ;;
+            esac
+          done
+          ls -lh *.apk
+
+      - name: 上传 APK 构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: PolyFlixPlayer-Android-APK
+          path: build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # 默认关闭，避免与仓库原有 release.yml（tag 触发发公告）产生竞态。
+      # 需要时手动触发并在当前 ref 为 tag 的情况下勾选。
+      - name: 附加 APK 到 Release（可选）
+        if: ${{ inputs.attach_to_release && startsWith(github.ref, 'refs/tags/') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/app/outputs/flutter-apk/*.apk
+          fail_on_unmatched_files: true
