@@ -74,6 +74,43 @@ jobs:
             android/gradle/wrapper/gradle-wrapper.properties
           grep distributionUrl android/gradle/wrapper/gradle-wrapper.properties
 
+      # GitHub Actions 共享出口 IP 常被 Maven Central 限流(429)。
+      # 项目自带的阿里云镜像只作用于主工程；Flutter 的 included build
+      # (flutter_tools/gradle) 用的是 SDK 内的仓库配置，会绕过它。
+      # 这里用 init script 全局重定向，覆盖主工程和所有 included build。
+      - name: 配置 Gradle 仓库镜像
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.gradle"
+          cat > "$HOME/.gradle/init.gradle" <<'GROOVY'
+          def toMirror = { String u ->
+              if (u.contains('repo.maven.apache.org') || u.contains('repo1.maven.org') || u.contains('plugins.gradle.org')) {
+                  return 'https://maven.aliyun.com/repository/gradle-plugin'
+              }
+              if (u.contains('dl.google.com')) {
+                  return 'https://maven.aliyun.com/repository/google'
+              }
+              return null
+          }
+          def redirect = { repo ->
+              if (repo instanceof org.gradle.api.artifacts.repositories.MavenArtifactRepository) {
+                  def mirror = toMirror(repo.url.toString())
+                  if (mirror) repo.url = mirror
+              }
+          }
+          gradle.beforeSettings { settings ->
+              settings.pluginManagement.repositories.all(redirect)
+          }
+          gradle.projectsLoaded { g ->
+              g.allprojects { p ->
+                  p.buildscript.repositories.all(redirect)
+                  p.repositories.all(redirect)
+              }
+          }
+          GROOVY
+          echo "已生成 ~/.gradle/init.gradle："
+          cat "$HOME/.gradle/init.gradle"
+
       - name: 配置 Flutter ${{ env.FLUTTER_VERSION }}
         uses: subosito/flutter-action@v2
         with:
@@ -86,11 +123,40 @@ jobs:
       - name: 拉取 Dart 依赖
         run: flutter pub get
 
+      # 偶发的 429/网络抖动用重试兜底（Flutter 自身的 100ms 重试太短）。
       - name: 构建通用 APK
-        run: flutter build apk --release
+        shell: bash
+        run: |
+          for i in 1 2 3; do
+            echo "===== 通用 APK 构建尝试 $i/3 ====="
+            if flutter build apk --release; then
+              echo "通用 APK 构建成功"
+              exit 0
+            fi
+            if [ "$i" -lt 3 ]; then
+              echo "第 $i 次失败，等待 20 秒后重试..."
+              sleep 20
+            fi
+          done
+          echo "通用 APK 连续 3 次构建失败"
+          exit 1
 
       - name: 构建分架构 APK
-        run: flutter build apk --release --split-per-abi
+        shell: bash
+        run: |
+          for i in 1 2 3; do
+            echo "===== 分架构 APK 构建尝试 $i/3 ====="
+            if flutter build apk --release --split-per-abi; then
+              echo "分架构 APK 构建成功"
+              exit 0
+            fi
+            if [ "$i" -lt 3 ]; then
+              echo "第 $i 次失败，等待 20 秒后重试..."
+              sleep 20
+            fi
+          done
+          echo "分架构 APK 连续 3 次构建失败"
+          exit 1
 
       - name: 按版本号重命名 APK
         shell: bash
