@@ -1,6 +1,6 @@
 name: 构建 Android APK
 
-# 说明：本工作流只负责编译并上传 APK，不改动仓库原有的 release.yml（发版公告）。
+# 说明：本工作流负责编译 APK 并发布到 Releases，不改动仓库原有的 release.yml（发版公告）。
 # 触发方式：
 #   1) 手动触发：Actions 页面 -> Build Android APK -> Run workflow
 #   2) 打 tag 触发：git tag v* && git push origin v*
@@ -13,11 +13,11 @@ on:
         required: false
         default: '3.47.9'
         type: string
-      attach_to_release:
-        description: '是否在同名 Release 上附加 APK（仅当前 ref 是 tag 时有效）'
+      release_tag:
+        description: '发布到哪个 Release tag（默认 android-latest；每次构建自动更新该 Release 的 APK）'
         required: false
-        default: false
-        type: boolean
+        default: 'android-latest'
+        type: string
   push:
     tags:
       - 'v*'
@@ -29,6 +29,7 @@ permissions:
 # 满足该约束的最低稳定版是 3.47.1（Dart 3.13.1），这里默认取同系列最新补丁 3.47.9。
 env:
   FLUTTER_VERSION: ${{ inputs.flutter_version || '3.47.9' }}
+  RELEASE_TAG: ${{ inputs.release_tag || 'android-latest' }}
 
 jobs:
   build-android:
@@ -176,6 +177,11 @@ jobs:
             esac
           done
           ls -lh *.apk
+          echo "APP_VERSION=$VER" >> "$GITHUB_ENV"
+
+      - name: 记录构建时间
+        shell: bash
+        run: echo "BUILD_TIME=$(date '+%Y-%m-%d %H:%M %Z')" >> "$GITHUB_ENV"
 
       - name: 上传 APK 构建产物
         uses: actions/upload-artifact@v4
@@ -185,11 +191,28 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # 默认关闭，避免与仓库原有 release.yml（tag 触发发公告）产生竞态。
-      # 需要时手动触发并在当前 ref 为 tag 的情况下勾选。
-      - name: 附加 APK 到 Release（可选）
-        if: ${{ inputs.attach_to_release && startsWith(github.ref, 'refs/tags/') }}
+      # 每次构建成功都发布到 Releases，下载入口固定（tag 默认 android-latest）。
+      # overwrite_files 让重复构建时覆盖同名 APK，Release 始终指向最新包。
+      - name: 发布 APK 到 Releases
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: '影现播放器 PolyFlixPlayer · Android 最新版'
+          body: |
+            ## Android 版 APK（自动构建）
+
+            - 版本：v${{ env.APP_VERSION }}
+            - 构建时间：${{ env.BUILD_TIME }}
+            - 提交：${{ github.sha }}
+
+            ### 下载哪个？
+            - `universal`：通用包，兼容所有架构，体积最大
+            - `arm64-v8a`：64 位手机（近年主流机型，推荐）
+            - `armeabi-v7a`：32 位老机型
+            - `x86_64`：模拟器 / x86 设备
+
+            > 本 Release 由 GitHub Actions 自动构建，每次构建会覆盖同名 APK，始终为最新版。
+            > 应用为 debug 签名，可直接安装；正式上架需替换为自有签名。
           files: build/app/outputs/flutter-apk/*.apk
           fail_on_unmatched_files: true
+          overwrite_files: true
